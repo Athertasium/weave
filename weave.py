@@ -169,7 +169,7 @@ with st.sidebar:
         st.session_state.grid = [[1]*st.session_state.cols for _ in range(st.session_state.rows)]; st.rerun()
 
 # ── Lifting plan grid ─────────────────────────────────────────────────────────
-st.subheader("Lifting plan — click cells to toggle")
+st.subheader("design plan — click cells to toggle")
 
 R = st.session_state.rows
 C = st.session_state.cols
