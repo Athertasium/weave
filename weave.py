@@ -1,27 +1,31 @@
 import streamlit as st
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 import io
+import json
+from dotenv import load_dotenv
+import anthropic
+import os
+load_dotenv()  
 
 st.set_page_config(layout="wide", page_title="Weave Visualizer")
 
 st.markdown("""
 <style>
-/* Style checkboxes as square toggle cells */
 div[data-testid="stCheckbox"] {
     display: inline-flex !important;
     align-items: center !important;
     justify-content: center !important;
-    width: 44px !important;
-    height: 44px !important;
-    margin: 2px !important;
+    width: 40px !important;
+    height: 40px !important;
+    margin: 1px !important;
 }
 div[data-testid="stCheckbox"] label {
     display: flex !important;
     align-items: center !important;
     justify-content: center !important;
-    width: 40px !important;
-    height: 40px !important;
-    border-radius: 6px !important;
+    width: 36px !important;
+    height: 36px !important;
+    border-radius: 5px !important;
     border: 1.5px solid #444 !important;
     cursor: pointer !important;
     background: #1e1e2e !important;
@@ -31,14 +35,22 @@ div[data-testid="stCheckbox"]:has(input:checked) label {
     background: #1a56db !important;
     border-color: #1a56db !important;
 }
-div[data-testid="stCheckbox"] p { display: none !important; }
+div[data-testid="stCheckbox"] p   { display: none !important; }
 div[data-testid="stCheckbox"] svg { display: none !important; }
 div[data-testid="stCheckbox"] input {
     position: absolute; opacity: 0;
-    width: 40px; height: 40px; cursor: pointer; margin: 0;
+    width: 36px; height: 36px; cursor: pointer; margin: 0;
 }
 div[data-testid="column"] { padding: 0 1px !important; min-width: 0 !important; }
 div[data-testid="stHorizontalBlock"] { gap: 0 !important; flex-wrap: nowrap !important; }
+div[data-testid="stButton"] > button[kind="primary"] {
+    background: #1a56db !important;
+    color: white !important;
+    border: none !important;
+    font-size: 16px !important;
+    padding: 0.6rem 2rem !important;
+    border-radius: 8px !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -46,7 +58,7 @@ st.title("🧵 Weave Visualizer")
 
 # ── Presets ───────────────────────────────────────────────────────────────────
 PRESETS = {
-    "Plain":     [[0,1],[1,0]],
+    "Plain":     [[1,0],[0,1]],
     "Twill 2/2": [[1,1,0,0],[0,1,1,0],[0,0,1,1],[1,0,0,1]],
     "Basket":    [[1,1,0,0],[1,1,0,0],[0,0,1,1],[0,0,1,1]],
     "Satin":     [[1,0,0,0,0],[0,0,1,0,0],[0,0,0,0,1],[0,1,0,0,0],[0,0,0,1,0]],
@@ -57,30 +69,110 @@ PRESETS = {
 def _default_grid(r, c):
     return [[0]*c for _ in range(r)]
 
-if "rows"        not in st.session_state: st.session_state.rows = 4
-if "cols"        not in st.session_state: st.session_state.cols = 4
-if "grid"        not in st.session_state: st.session_state.grid = _default_grid(4, 4)
-if "warp_color"  not in st.session_state: st.session_state.warp_color  = "#d43030"
-if "weft_color"  not in st.session_state: st.session_state.weft_color  = "#2255cc"
-if "bg_color"    not in st.session_state: st.session_state.bg_color    = "#f5f0e8"
-if "fabric_size" not in st.session_state: st.session_state.fabric_size = 60
-if "zoom_level"  not in st.session_state: st.session_state.zoom_level  = 4
+if "rows"           not in st.session_state: st.session_state.rows = 4
+if "cols"           not in st.session_state: st.session_state.cols = 4
+if "grid"           not in st.session_state: st.session_state.grid = _default_grid(4, 4)
+if "warp_color"     not in st.session_state: st.session_state.warp_color  = "#d43030"
+if "weft_color"     not in st.session_state: st.session_state.weft_color  = "#2255cc"
+if "bg_color"       not in st.session_state: st.session_state.bg_color    = "#f5f0e8"
+if "fabric_size"    not in st.session_state: st.session_state.fabric_size = 60
+if "zoom_level"     not in st.session_state: st.session_state.zoom_level  = 4
+if "generated"      not in st.session_state: st.session_state.generated   = False
+if "ai_report"      not in st.session_state: st.session_state.ai_report   = None
+if "snap_grid"      not in st.session_state: st.session_state.snap_grid   = None
+if "snap_threading" not in st.session_state: st.session_state.snap_threading = None
+if "snap_lifting"   not in st.session_state: st.session_state.snap_lifting   = None
+if "snap_shafts"    not in st.session_state: st.session_state.snap_shafts    = 0
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-def resize_grid(new_r, new_c):
-    old = st.session_state.grid
-    old_r, old_c = len(old), len(old[0]) if old else 0
-    st.session_state.grid = [
-        [old[i][j] if i < old_r and j < old_c else 0 for j in range(new_c)]
-        for i in range(new_r)
-    ]
+# ── Weave analysis ────────────────────────────────────────────────────────────
+def compute_heald_and_lifting(grid):
+    R = len(grid)
+    C = len(grid[0]) if R else 0
+    col_signatures = {}
+    threading = []
+    shaft_count = 0
+    for j in range(C):
+        sig = tuple(grid[i][j] for i in range(R))
+        if sig not in col_signatures:
+            col_signatures[sig] = shaft_count
+            shaft_count += 1
+        threading.append(col_signatures[sig])
+    shaft_rep = {}
+    for j, sh in enumerate(threading):
+        if sh not in shaft_rep:
+            shaft_rep[sh] = j
+    lifting = []
+    for i in range(R):
+        row = [grid[i][shaft_rep[sh]] for sh in range(shaft_count)]
+        lifting.append(row)
+    threading_grid = [[0]*C for _ in range(shaft_count)]
+    for col, shaft in enumerate(threading):
+        threading_grid[shaft][col] = 1
+    return threading_grid, lifting, shaft_count
 
-def load_preset(name):
-    p = [row[:] for row in PRESETS[name]]
-    st.session_state.rows = len(p)
-    st.session_state.cols = len(p[0])
-    st.session_state.grid = p
+# ── AI explanation ────────────────────────────────────────────────────────────
+def get_ai_explanation(grid, num_shafts):
+    R = len(grid)
+    C = len(grid[0]) if R else 0
+    warp_ups = sum(grid[i][j] for i in range(R) for j in range(C))
+    total = R * C
+    float_ratio = warp_ups / total if total else 0
 
+    grid_str = "\n".join(
+        f"Pick {R-i}: {grid[i]}" for i in range(R)
+    )
+
+    prompt = f"""You are an expert textile engineer specializing in woven fabric construction.
+Analyze this weave design repeat and provide a structured technical report.
+
+Design repeat ({R} picks × {C} ends):
+{grid_str}
+(1 = warp up / warp float, 0 = weft up / weft float)
+
+Warp float ratio: {float_ratio:.2f}
+Number of shafts required: {num_shafts}
+Repeat size: {R} picks × {C} ends
+
+Respond ONLY with a valid JSON object, no markdown, no explanation outside JSON.
+Use exactly this structure:
+{{
+  "weave_name": "string — name of this weave structure",
+  "weave_family": "string — e.g. plain, twill, satin, derivative",
+  "description": "string — 2-3 sentences describing the interlacement pattern",
+  "num_shafts": {num_shafts},
+  "repeat": "{R}P x {C}E",
+  "float_length": "string — max float length for warp and weft",
+  "epi_range": "string — typical ends per inch range e.g. 60-80",
+  "ppi_range": "string — typical picks per inch range e.g. 55-70",
+  "yarn_count_range": "string — suitable yarn count range e.g. 20s-40s Ne",
+  "cover_factor": "string — low / medium / high with brief reason",
+  "fabric_weight": "string — typical gsm range",
+  "typical_end_uses": ["list", "of", "3-5", "end uses"],
+  "loom_type": "string — suitable loom types",
+  "fabric_properties": {{
+    "drape": "string",
+    "hand_feel": "string",
+    "durability": "string",
+    "breathability": "string"
+  }},
+  "design_notes": "string — any special notes about this weave pattern"
+}}"""
+
+    try:
+        import anthropic, os
+        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1000,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        text = response.content[0].text.strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+        return json.loads(text)
+    except Exception as e:
+        return {"error": str(e)}
+
+# ── Drawing helpers ───────────────────────────────────────────────────────────
 def hex_to_rgb(h):
     h = h.lstrip("#")
     return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
@@ -94,36 +186,32 @@ def draw_fabric(big_pattern, fs, cell_px):
     bg_rgb   = hex_to_rgb(st.session_state.bg_color)
     warp_dark, warp_hi = darken(warp_rgb), lighten(warp_rgb)
     weft_dark, weft_hi = darken(weft_rgb), lighten(weft_rgb)
-
     sz  = fs * cell_px
     img = Image.new("RGB", (sz, sz), bg_rgb)
     draw = ImageDraw.Draw(img)
     gap = max(1, cell_px // 10)
     pad = max(2, cell_px // 5)
     r   = max(1, cell_px // 4)
-
-    for i in range(fs):   # weft base layer
+    for i in range(fs):
         y0, y1 = i*cell_px+pad, (i+1)*cell_px-pad
         draw.rectangle([0, y0, sz, y1], fill=weft_rgb)
         draw.rectangle([0, y1-gap, sz, y1], fill=weft_dark)
         draw.rectangle([0, y0, sz, y0+gap], fill=weft_hi)
-
-    for j in range(fs):   # warp base layer
+    for j in range(fs):
         x0, x1 = j*cell_px+pad, (j+1)*cell_px-pad
         draw.rectangle([x0, 0, x1, sz], fill=warp_rgb)
         draw.rectangle([x1-gap, 0, x1, sz], fill=warp_dark)
         draw.rectangle([x0, 0, x0+gap, sz], fill=warp_hi)
-
-    for i in range(fs):   # over-thread per cell
+    for i in range(fs):
         for j in range(fs):
             x, y = j*cell_px, i*cell_px
-            if big_pattern[i][j] == 1:   # warp on top
+            if big_pattern[i][j] == 1:
                 x0,x1 = x+pad, x+cell_px-pad
                 y0,y1 = y-pad, y+cell_px+pad
                 draw.rounded_rectangle([x0,y0,x1,y1], radius=r, fill=warp_rgb)
                 draw.rectangle([x1-gap,y0,x1,y1], fill=warp_dark)
                 draw.rectangle([x0,y0,x0+gap,y1], fill=warp_hi)
-            else:                         # weft on top
+            else:
                 x0,x1 = x-pad, x+cell_px+pad
                 y0,y1 = y+pad, y+cell_px-pad
                 draw.rounded_rectangle([x0,y0,x1,y1], radius=r, fill=weft_rgb)
@@ -131,18 +219,80 @@ def draw_fabric(big_pattern, fs, cell_px):
                 draw.rectangle([x0,y0,x1,y0+gap], fill=weft_hi)
     return img
 
-def make_fabric():
-    g, R, C, fs = st.session_state.grid, st.session_state.rows, st.session_state.cols, st.session_state.fabric_size
-    return [[g[i%R][j%C] for j in range(fs)] for i in range(fs)]
+def draw_plan(matrix, rows, cols, cell=36,
+              filled=(26,86,219), empty=(30,30,46),
+              border=(80,80,80), bg=(15,15,25),
+              row_labels=None, col_labels=None, flip_rows=True):
+    LPAD = 30
+    BPAD = 24
+    w = LPAD + cols * cell
+    h = rows * cell + BPAD
+    img = Image.new("RGB", (w, h), bg)
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 11)
+    except:
+        font = ImageFont.load_default()
+
+    for r in range(rows):
+        dr = (rows - 1 - r) if flip_rows else r
+        for c in range(cols):
+            x0 = LPAD + c * cell
+            y0 = dr * cell
+            x1, y1 = x0 + cell - 2, y0 + cell - 2
+            val = matrix[r][c]
+            fill = filled if val else empty
+            draw.rectangle([x0, y0, x1, y1], fill=fill, outline=border)
+            if val:
+                cx, cy = (x0+x1)//2, (y0+y1)//2
+                s = max(4, cell//5)
+                draw.line([cx-s, cy-s, cx+s, cy+s], fill=(200,220,255), width=2)
+                draw.line([cx+s, cy-s, cx-s, cy+s], fill=(200,220,255), width=2)
+
+    if col_labels:
+        for c, lbl in enumerate(col_labels):
+            x = LPAD + c * cell + cell // 2
+            draw.text((x, rows*cell + 4), str(lbl), fill=(160,160,160), font=font, anchor="mt")
+
+    if row_labels:
+        for r, lbl in enumerate(row_labels):
+            dr = (rows - 1 - r) if flip_rows else r
+            y = dr * cell + cell // 2
+            draw.text((LPAD - 4, y), str(lbl), fill=(160,160,160), font=font, anchor="rm")
+
+    return img
+
+def make_fabric(grid=None):
+    if grid is None:
+        grid = st.session_state.grid
+    R, C, fs = st.session_state.rows, st.session_state.cols, st.session_state.fabric_size
+    return [[grid[i%R][j%C] for j in range(fs)] for i in range(fs)]
+
+def resize_grid(new_r, new_c):
+    old = st.session_state.grid
+    old_r, old_c = len(old), len(old[0]) if old else 0
+    st.session_state.grid = [
+        [old[i][j] if i < old_r and j < old_c else 0 for j in range(new_c)]
+        for i in range(new_r)
+    ]
+
+def load_preset(name):
+    p = [row[:] for row in PRESETS[name]]
+    st.session_state.rows = len(p)
+    st.session_state.cols = len(p[0])
+    st.session_state.grid = p
+    st.session_state.generated = False
+    st.session_state.ai_report = None
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("Settings")
-    new_r = st.slider("Rows",    2, 12, st.session_state.rows, key="row_slider")
-    new_c = st.slider("Columns", 2, 12, st.session_state.cols, key="col_slider")
+    new_r = st.slider("Rows (picks)",   2, 12, st.session_state.rows, key="row_slider")
+    new_c = st.slider("Columns (ends)", 2, 12, st.session_state.cols, key="col_slider")
     if new_r != st.session_state.rows or new_c != st.session_state.cols:
         st.session_state.rows, st.session_state.cols = new_r, new_c
         resize_grid(new_r, new_c)
+        st.session_state.generated = False
         st.rerun()
 
     st.session_state.fabric_size = st.slider("Fabric size", 20, 120, st.session_state.fabric_size)
@@ -164,59 +314,182 @@ with st.sidebar:
 
     st.divider()
     if st.button("Clear"):
-        st.session_state.grid = _default_grid(st.session_state.rows, st.session_state.cols); st.rerun()
+        st.session_state.grid = _default_grid(st.session_state.rows, st.session_state.cols)
+        st.session_state.generated = False
+        st.rerun()
     if st.button("Fill all"):
-        st.session_state.grid = [[1]*st.session_state.cols for _ in range(st.session_state.rows)]; st.rerun()
+        st.session_state.grid = [[1]*st.session_state.cols for _ in range(st.session_state.rows)]
+        st.session_state.generated = False
+        st.rerun()
 
-# ── Lifting plan grid ─────────────────────────────────────────────────────────
-st.subheader("design plan — click cells to toggle")
+# ── Design input grid ─────────────────────────────────────────────────────────
+st.subheader("Step 1 — Draw your design repeat")
+st.caption("1 = warp up (■ blue)  |  0 = weft up (□ dark)  |  Pick rows shown bottom→top")
 
 R = st.session_state.rows
 C = st.session_state.cols
 g = st.session_state.grid
 
-# Column number headers
-hcols = st.columns([0.3] + [1]*C)
+hcols = st.columns([0.35] + [1]*C)
 for j in range(C):
     hcols[j+1].markdown(
-        f"<div style='text-align:center;font-size:11px;color:#888;margin-bottom:2px'>{j+1}</div>",
+        f"<div style='text-align:center;font-size:11px;color:#888;margin-bottom:2px'>E{j+1}</div>",
         unsafe_allow_html=True)
 
-# Grid rows — each cell is a checkbox (styled as blue square when checked)
 for i in range(R):
-    rcols = st.columns([0.3] + [1]*C)
+    display_i = R - 1 - i
+    rcols = st.columns([0.35] + [1]*C)
     rcols[0].markdown(
-        f"<div style='text-align:right;font-size:11px;color:#888;padding-top:12px;padding-right:4px'>{i+1}</div>",
+        f"<div style='text-align:right;font-size:11px;color:#888;padding-top:10px;padding-right:6px'>P{display_i+1}</div>",
         unsafe_allow_html=True)
     for j in range(C):
         new_val = rcols[j+1].checkbox(
             label=" ",
-            value=bool(g[i][j]),
-            key=f"cell_{i}_{j}",
+            value=bool(g[display_i][j]),
+            key=f"cell_{display_i}_{j}",
             label_visibility="hidden"
         )
-        if int(new_val) != g[i][j]:
-            st.session_state.grid[i][j] = int(new_val)
-            st.rerun()
+        if int(new_val) != g[display_i][j]:
+            st.session_state.grid[display_i][j] = int(new_val)
+            st.session_state.generated = False
 
-# ── Fabric display ────────────────────────────────────────────────────────────
-st.divider()
-big  = make_fabric()
-fs   = st.session_state.fabric_size
-zoom = st.session_state.zoom_level
+# ── Generate button ───────────────────────────────────────────────────────────
+st.markdown("###")
+col_btn, _ = st.columns([1, 3])
+with col_btn:
+    generate_clicked = st.button("⚡ Generate", type="primary", use_container_width=True)
 
-out_img  = draw_fabric(big, fs, cell_px=4)
-zoom_fs  = min(fs, max(4, 24 // zoom + 4))
-zoom_img = draw_fabric(big, zoom_fs, cell_px=zoom * 8)
+if generate_clicked:
+    grid_snap = [row[:] for row in st.session_state.grid]
+    threading_grid, lifting, num_shafts = compute_heald_and_lifting(grid_snap)
+    st.session_state.snap_grid      = grid_snap
+    st.session_state.snap_threading = threading_grid
+    st.session_state.snap_lifting   = lifting
+    st.session_state.snap_shafts    = num_shafts
+    st.session_state.generated      = True
+    with st.spinner("🤖 Analysing weave with AI..."):
+        st.session_state.ai_report = get_ai_explanation(grid_snap, num_shafts)
 
-col1, col2 = st.columns(2)
-with col1:
-    st.caption("Full fabric (zoomed out)")
-    st.image(out_img, use_container_width=True)
+# ── Output section ────────────────────────────────────────────────────────────
+if st.session_state.generated and st.session_state.snap_grid:
+    grid_snap      = st.session_state.snap_grid
+    threading_grid = st.session_state.snap_threading
+    lifting        = st.session_state.snap_lifting
+    num_shafts     = st.session_state.snap_shafts
+    R_s = len(grid_snap)
+    C_s = len(grid_snap[0])
 
-with col2:
-    st.caption(f"Zoomed in (×{zoom})")
-    st.image(zoom_img, use_container_width=True)
-    buf = io.BytesIO()
-    zoom_img.save(buf, format="PNG")
-    st.download_button("⬇ Download", buf.getvalue(), "fabric.png", "image/png")
+    st.markdown("---")
+
+    # ── Heald plan ────────────────────────────────────────────────────────────
+    st.subheader("Step 2 — Heald (Threading) Plan")
+    st.caption(f"{num_shafts} shaft(s) required  ·  End numbers along bottom, shaft numbers on left")
+    thead_img = draw_plan(
+        threading_grid, rows=num_shafts, cols=C_s, cell=42,
+        row_labels=[f"S{s+1}" for s in range(num_shafts)],
+        col_labels=[str(j+1) for j in range(C_s)],
+        flip_rows=True,
+    )
+    st.image(thead_img, use_container_width=False)
+
+    st.markdown("---")
+
+    # ── Design repeat + Lifting plan ──────────────────────────────────────────
+    st.subheader("Step 3 — Design Repeat + Lifting Plan")
+    lc, rc = st.columns([2, 1], gap="large")
+
+    with lc:
+        st.caption("Design repeat (static snapshot)")
+        design_img = draw_plan(
+            grid_snap, rows=R_s, cols=C_s, cell=42,
+            filled=(26,86,219), empty=(30,30,46),
+            row_labels=[f"P{i+1}" for i in range(R_s)],
+            col_labels=[str(j+1) for j in range(C_s)],
+            flip_rows=True,
+        )
+        st.image(design_img, use_container_width=False)
+
+    with rc:
+        st.caption(f"Lifting plan ({R_s} picks × {num_shafts} shafts)")
+        lift_img = draw_plan(
+            lifting, rows=R_s, cols=num_shafts, cell=42,
+            row_labels=[f"P{i+1}" for i in range(R_s)],
+            col_labels=[f"S{s+1}" for s in range(num_shafts)],
+            flip_rows=True,
+        )
+        st.image(lift_img, use_container_width=False)
+
+    st.markdown("---")
+
+    # ── Fabric simulation ─────────────────────────────────────────────────────
+    st.subheader("Step 4 — Fabric Simulation")
+    big      = make_fabric(grid_snap)
+    fs       = st.session_state.fabric_size
+    zoom     = st.session_state.zoom_level
+    out_img  = draw_fabric(big, fs, cell_px=4)
+    zoom_fs  = min(fs, max(4, 24 // zoom + 4))
+    zoom_img = draw_fabric(big, zoom_fs, cell_px=zoom * 8)
+
+    fc1, fc2 = st.columns(2)
+    with fc1:
+        st.caption("Full fabric (zoomed out)")
+        st.image(out_img, use_container_width=True)
+    with fc2:
+        st.caption(f"Zoomed in (×{zoom})")
+        st.image(zoom_img, use_container_width=True)
+        buf = io.BytesIO()
+        zoom_img.save(buf, format="PNG")
+        st.download_button("⬇ Download", buf.getvalue(), "fabric.png", "image/png")
+
+    st.markdown("---")
+
+    # ── AI Report ─────────────────────────────────────────────────────────────
+    st.subheader("Step 5 — AI Weave Analysis")
+
+    rpt = st.session_state.ai_report
+    if rpt and "error" not in rpt:
+        # Header card
+        st.markdown(f"### {rpt.get('weave_name','—')}  `{rpt.get('weave_family','')}`")
+        st.markdown(rpt.get("description",""))
+
+        st.markdown("####")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Shafts required",  rpt.get("num_shafts", num_shafts))
+        c2.metric("Repeat size",      rpt.get("repeat","—"))
+        c3.metric("Float length",     rpt.get("float_length","—"))
+        c4.metric("Cover factor",     rpt.get("cover_factor","—").split("—")[0].strip())
+
+        st.markdown("####")
+        d1, d2, d3, d4 = st.columns(4)
+        d1.metric("EPI (ends/inch)",  rpt.get("epi_range","—"))
+        d2.metric("PPI (picks/inch)", rpt.get("ppi_range","—"))
+        d3.metric("Yarn count",       rpt.get("yarn_count_range","—"))
+        d4.metric("Fabric weight",    rpt.get("fabric_weight","—"))
+
+        st.markdown("####")
+        p = rpt.get("fabric_properties", {})
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("Drape",         p.get("drape","—"))
+        p2.metric("Hand feel",     p.get("hand_feel","—"))
+        p3.metric("Durability",    p.get("durability","—"))
+        p4.metric("Breathability", p.get("breathability","—"))
+
+        st.markdown("####")
+        uses = rpt.get("typical_end_uses", [])
+        st.markdown("**Typical end uses**")
+        st.markdown("  ·  ".join(f"🔹 {u}" for u in uses))
+
+        st.markdown("####")
+        lc2, rc2 = st.columns(2)
+        with lc2:
+            st.info(f"**Suitable loom:** {rpt.get('loom_type','—')}")
+        with rc2:
+            st.info(f"**Design notes:** {rpt.get('design_notes','—')}")
+
+    elif rpt and "error" in rpt:
+        st.error(f"AI analysis failed: {rpt['error']}")
+    else:
+        st.info("AI analysis pending.")
+
+else:
+    st.info("👆 Draw your design repeat above, then click **⚡ Generate** to see the heald plan, lifting plan, fabric simulation and AI analysis.")
