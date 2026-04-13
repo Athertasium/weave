@@ -170,7 +170,7 @@ Use exactly this JSON structure:
         import google.generativeai as genai
         import os
         
-        api_key = os.environ.get("GEMINI_API_KEY")
+        api_key = st.secrets["GEMINI_API_KEY"]
         if not api_key:
             return {"error": "GEMINI_API_KEY environment variable is not set."}
             
