@@ -2,9 +2,7 @@ import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 import io
 import json
-import os
-import dotenv
-dotenv.load_dotenv()
+
 st.set_page_config(layout="wide", page_title="Weave Visualizer")
 
 st.markdown("""
