@@ -2,10 +2,9 @@ import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 import io
 import json
-from dotenv import load_dotenv
-import anthropic
 import os
-load_dotenv()  
+import dotenv
+dotenv.load_dotenv()
 
 st.set_page_config(layout="wide", page_title="Weave Visualizer")
 
@@ -50,6 +49,17 @@ div[data-testid="stButton"] > button[kind="primary"] {
     font-size: 16px !important;
     padding: 0.6rem 2rem !important;
     border-radius: 8px !important;
+}
+/* Styling for AI Metric Cards */
+div[data-testid="stMetricValue"] {
+    font-size: 1.4rem !important;
+    color: #e8e8f0 !important;
+}
+div[data-testid="stMetricLabel"] {
+    color: #888 !important;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-size: 0.8rem !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -110,7 +120,7 @@ def compute_heald_and_lifting(grid):
         threading_grid[shaft][col] = 1
     return threading_grid, lifting, shaft_count
 
-# ── AI explanation ────────────────────────────────────────────────────────────
+# ── AI explanation (Google Gemini) ────────────────────────────────────────────
 def get_ai_explanation(grid, num_shafts):
     R = len(grid)
     C = len(grid[0]) if R else 0
@@ -133,8 +143,7 @@ Warp float ratio: {float_ratio:.2f}
 Number of shafts required: {num_shafts}
 Repeat size: {R} picks × {C} ends
 
-Respond ONLY with a valid JSON object, no markdown, no explanation outside JSON.
-Use exactly this structure:
+Use exactly this JSON structure:
 {{
   "weave_name": "string — name of this weave structure",
   "weave_family": "string — e.g. plain, twill, satin, derivative",
@@ -159,16 +168,24 @@ Use exactly this structure:
 }}"""
 
     try:
-        import anthropic, os
-        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1000,
-            messages=[{"role": "user", "content": prompt}]
+        import google.generativeai as genai
+        import os
+        
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            return {"error": "GEMINI_API_KEY environment variable is not set."}
+            
+        genai.configure(api_key=api_key)
+        
+        # Enforcing JSON output natively
+        model = genai.GenerativeModel(
+            'gemini-3.1-flash-lite-preview',
+            generation_config={"response_mime_type": "application/json"}
         )
-        text = response.content[0].text.strip()
-        text = text.replace("```json", "").replace("```", "").strip()
-        return json.loads(text)
+        
+        response = model.generate_content(prompt)
+        return json.loads(response.text)
+        
     except Exception as e:
         return {"error": str(e)}
 
@@ -323,7 +340,7 @@ with st.sidebar:
         st.rerun()
 
 # ── Design input grid ─────────────────────────────────────────────────────────
-st.subheader("Step 1 — Draw your design repeat")
+st.subheader("Design Canvas")
 st.caption("1 = warp up (■ blue)  |  0 = weft up (□ dark)  |  Pick rows shown bottom→top")
 
 R = st.session_state.rows
@@ -357,7 +374,7 @@ for i in range(R):
 st.markdown("###")
 col_btn, _ = st.columns([1, 3])
 with col_btn:
-    generate_clicked = st.button("⚡ Generate", type="primary", use_container_width=True)
+    generate_clicked = st.button("Generate", type="primary", use_container_width=True)
 
 if generate_clicked:
     grid_snap = [row[:] for row in st.session_state.grid]
@@ -367,7 +384,7 @@ if generate_clicked:
     st.session_state.snap_lifting   = lifting
     st.session_state.snap_shafts    = num_shafts
     st.session_state.generated      = True
-    with st.spinner("🤖 Analysing weave with AI..."):
+    with st.spinner("Analysing weave with AI..."):
         st.session_state.ai_report = get_ai_explanation(grid_snap, num_shafts)
 
 # ── Output section ────────────────────────────────────────────────────────────
@@ -381,25 +398,24 @@ if st.session_state.generated and st.session_state.snap_grid:
 
     st.markdown("---")
 
-    # ── Heald plan ────────────────────────────────────────────────────────────
-    st.subheader("Step 2 — Heald (Threading) Plan")
+    # ── Technical Drafting Plans ──────────────────────────────────────────────
+    st.subheader("Technical Drafting Plans")
     st.caption(f"{num_shafts} shaft(s) required  ·  End numbers along bottom, shaft numbers on left")
-    thead_img = draw_plan(
-        threading_grid, rows=num_shafts, cols=C_s, cell=42,
-        row_labels=[f"S{s+1}" for s in range(num_shafts)],
-        col_labels=[str(j+1) for j in range(C_s)],
-        flip_rows=True,
-    )
-    st.image(thead_img, use_container_width=False)
-
-    st.markdown("---")
-
-    # ── Design repeat + Lifting plan ──────────────────────────────────────────
-    st.subheader("Step 3 — Design Repeat + Lifting Plan")
-    lc, rc = st.columns([2, 1], gap="large")
-
+    
+    lc, rc = st.columns([1.5, 1], gap="large")
+    
     with lc:
-        st.caption("Design repeat (static snapshot)")
+        st.markdown("**Heald (Threading) Plan**")
+        thead_img = draw_plan(
+            threading_grid, rows=num_shafts, cols=C_s, cell=42,
+            row_labels=[f"S{s+1}" for s in range(num_shafts)],
+            col_labels=[str(j+1) for j in range(C_s)],
+            flip_rows=True,
+        )
+        st.image(thead_img, use_container_width=False)
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("**Design Repeat**")
         design_img = draw_plan(
             grid_snap, rows=R_s, cols=C_s, cell=42,
             filled=(26,86,219), empty=(30,30,46),
@@ -410,7 +426,7 @@ if st.session_state.generated and st.session_state.snap_grid:
         st.image(design_img, use_container_width=False)
 
     with rc:
-        st.caption(f"Lifting plan ({R_s} picks × {num_shafts} shafts)")
+        st.markdown("**Lifting Plan**")
         lift_img = draw_plan(
             lifting, rows=R_s, cols=num_shafts, cell=42,
             row_labels=[f"P{i+1}" for i in range(R_s)],
@@ -419,10 +435,11 @@ if st.session_state.generated and st.session_state.snap_grid:
         )
         st.image(lift_img, use_container_width=False)
 
+
     st.markdown("---")
 
-    # ── Fabric simulation ─────────────────────────────────────────────────────
-    st.subheader("Step 4 — Fabric Simulation")
+    # ── Fabric Simulation ─────────────────────────────────────────────────────
+    st.subheader("Fabric Simulation")
     big      = make_fabric(grid_snap)
     fs       = st.session_state.fabric_size
     zoom     = st.session_state.zoom_level
@@ -439,52 +456,78 @@ if st.session_state.generated and st.session_state.snap_grid:
         st.image(zoom_img, use_container_width=True)
         buf = io.BytesIO()
         zoom_img.save(buf, format="PNG")
-        st.download_button("⬇ Download", buf.getvalue(), "fabric.png", "image/png")
+        st.download_button("⬇ Download Image", buf.getvalue(), "fabric.png", "image/png")
 
     st.markdown("---")
 
-    # ── AI Report ─────────────────────────────────────────────────────────────
-    st.subheader("Step 5 — AI Weave Analysis")
+    # ── AI Weave Analysis ─────────────────────────────────────────────────────
+    st.subheader("AI Weave Analysis")
 
     rpt = st.session_state.ai_report
     if rpt and "error" not in rpt:
-        # Header card
-        st.markdown(f"### {rpt.get('weave_name','—')}  `{rpt.get('weave_family','')}`")
-        st.markdown(rpt.get("description",""))
+        
+        # Header block
+        st.markdown(f"### {rpt.get('weave_name','—')}")
+        st.markdown(
+            f"<span style='background:#1e3a5f;color:#7eb8f7;padding:4px 12px;"
+            f"border-radius:20px;font-size:13px;font-weight:600;letter-spacing:0.5px;'>"
+            f"{rpt.get('weave_family','').upper()}</span>",
+            unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown(f"*{rpt.get('description','')}*")
+        st.markdown("<br>", unsafe_allow_html=True)
 
-        st.markdown("####")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Shafts required",  rpt.get("num_shafts", num_shafts))
-        c2.metric("Repeat size",      rpt.get("repeat","—"))
-        c3.metric("Float length",     rpt.get("float_length","—"))
-        c4.metric("Cover factor",     rpt.get("cover_factor","—").split("—")[0].strip())
+        st.markdown("#### Structural Specifications")
+        
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Shafts Required", rpt.get("num_shafts", num_shafts))
+        m2.metric("Repeat Size", rpt.get("repeat", "—"))
+        m3.metric("Float Length", rpt.get("float_length", "—"))
+        m4.metric("Cover Factor", rpt.get("cover_factor", "—").title())
+        
+        m5, m6, m7, m8 = st.columns(4)
+        m5.metric("EPI (Ends/Inch)", rpt.get("epi_range", "—"))
+        m6.metric("PPI (Picks/Inch)", rpt.get("ppi_range", "—"))
+        m7.metric("Yarn Count Range", rpt.get("yarn_count_range", "—"))
+        m8.metric("Fabric Weight", rpt.get("fabric_weight", "—"))
 
-        st.markdown("####")
-        d1, d2, d3, d4 = st.columns(4)
-        d1.metric("EPI (ends/inch)",  rpt.get("epi_range","—"))
-        d2.metric("PPI (picks/inch)", rpt.get("ppi_range","—"))
-        d3.metric("Yarn count",       rpt.get("yarn_count_range","—"))
-        d4.metric("Fabric weight",    rpt.get("fabric_weight","—"))
+        st.markdown("#### Fabric Properties")
+        def info_card(label, value, col):
+            col.markdown(
+                f"""<div style='background:#1a1a2e;border:1px solid #2d2d4e;
+                border-radius:8px;padding:14px 16px;margin-bottom:8px; height: 100%;'>
+                <div style='font-size:11px;color:#888;margin-bottom:6px;
+                text-transform:uppercase;letter-spacing:0.5px'>{label}</div>
+                <div style='font-size:14px;color:#e8e8f0;font-weight:500;
+                word-wrap:break-word;line-height:1.4'>{value}</div></div>""",
+                unsafe_allow_html=True)
 
-        st.markdown("####")
         p = rpt.get("fabric_properties", {})
         p1, p2, p3, p4 = st.columns(4)
-        p1.metric("Drape",         p.get("drape","—"))
-        p2.metric("Hand feel",     p.get("hand_feel","—"))
-        p3.metric("Durability",    p.get("durability","—"))
-        p4.metric("Breathability", p.get("breathability","—"))
+        info_card("Drape", p.get("drape","—"), p1)
+        info_card("Hand Feel", p.get("hand_feel","—"), p2)
+        info_card("Durability", p.get("durability","—"), p3)
+        info_card("Breathability", p.get("breathability","—"), p4)
 
-        st.markdown("####")
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        # End uses pills
         uses = rpt.get("typical_end_uses", [])
-        st.markdown("**Typical end uses**")
-        st.markdown("  ·  ".join(f"🔹 {u}" for u in uses))
+        st.markdown("**Typical End Uses**")
+        pills = " ".join(
+            f"<span style='background:#2a2a3e;color:#b0b0c0;padding:6px 14px;"
+            f"border-radius:20px;font-size:13px;margin-right:6px;margin-bottom:6px;display:inline-block; border: 1px solid #3d3d5e;'>"
+            f"{u}</span>" for u in uses)
+        st.markdown(pills, unsafe_allow_html=True)
 
-        st.markdown("####")
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        # Bottom notes
         lc2, rc2 = st.columns(2)
         with lc2:
-            st.info(f"**Suitable loom:** {rpt.get('loom_type','—')}")
+            info_card("Suitable Loom Type", rpt.get('loom_type','—'), lc2)
         with rc2:
-            st.info(f"**Design notes:** {rpt.get('design_notes','—')}")
+            info_card("Design Notes", rpt.get('design_notes','—'), rc2)
 
     elif rpt and "error" in rpt:
         st.error(f"AI analysis failed: {rpt['error']}")
@@ -492,4 +535,4 @@ if st.session_state.generated and st.session_state.snap_grid:
         st.info("AI analysis pending.")
 
 else:
-    st.info("👆 Draw your design repeat above, then click **⚡ Generate** to see the heald plan, lifting plan, fabric simulation and AI analysis.")
+    st.info("Draw your design repeat above, then click Generate to see the technical plans, fabric simulation, and expert analysis.")
