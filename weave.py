@@ -176,7 +176,7 @@ Use exactly this JSON structure:
         
         # Enforcing JSON output natively
         model = genai.GenerativeModel(
-            'gemini-3.1-flash-lite-preview',
+            'gemini-2.5-flash-lite',
             generation_config={"response_mime_type": "application/json"}
         )
         
